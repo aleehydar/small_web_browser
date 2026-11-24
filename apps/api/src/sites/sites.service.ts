@@ -112,6 +112,7 @@ export class SitesService {
         address,
         authorId: author._id,
         currentRevisionId: null,
+        currentNumber: 0,
         title,
         text,
         createdAt: new Date(),
@@ -179,10 +180,11 @@ export class SitesService {
       }
       await this.sites
         .updateOne(
-          { _id: site._id },
+          { _id: site._id, currentNumber: { $lt: created.number } },
           {
             $set: {
               currentRevisionId: created._id,
+              currentNumber: created.number,
               title: content.title,
               text: content.text,
             },

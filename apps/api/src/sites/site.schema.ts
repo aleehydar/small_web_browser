@@ -12,6 +12,9 @@ export class Site {
   @Prop({ type: Types.ObjectId, default: null })
   currentRevisionId: Types.ObjectId | null;
 
+  @Prop({ type: Number, default: 0 })
+  currentNumber: number;
+
   @Prop({ required: true, type: String })
   title: string;
 

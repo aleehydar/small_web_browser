@@ -2,6 +2,7 @@ import 'reflect-metadata';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { getConnectionToken, getModelToken, MongooseModule } from '@nestjs/mongoose';
 import { Test } from '@nestjs/testing';
+import { jest } from '@jest/globals';
 import { Types, type Connection, type Model } from 'mongoose';
 import request from 'supertest';
 import { PeopleModule } from './people/people.module';
@@ -390,6 +391,109 @@ describe('http api', () => {
     expect(stored.map((revision) => revision.number)).toEqual([
       1, 2, 3, 4, 5, 6,
     ]);
+  });
+
+  it('a lower revision that updates the site later does not replace a higher one', async () => {
+    const sites = app.get<Model<Site>>(getModelToken(Site.name));
+    const revisions = app.get<Model<Revision>>(getModelToken(Revision.name));
+    const original = sites.updateOne.bind(sites);
+    let releaseLower = (): void => {};
+    const holdLower = new Promise<void>((resolve) => {
+      releaseLower = resolve;
+    });
+    let markLowerStarted = (): void => {};
+    const lowerStarted = new Promise<void>((resolve) => {
+      markLowerStarted = resolve;
+    });
+    let held = false;
+    const spy = jest.spyOn(sites, 'updateOne').mockImplementation((...args) => {
+      const query = original(...args);
+      if (!held) {
+        held = true;
+        markLowerStarted();
+        const exec = query.exec.bind(query);
+        query.exec = ((...execArgs: Parameters<typeof exec>) =>
+          holdLower.then(() => exec(...execArgs))) as typeof query.exec;
+      }
+      return query;
+    });
+    let lowerPublish: Promise<request.Response> | undefined;
+    try {
+      const authorId = await createAuthor('ada', 'Ada Lovelace');
+      // .end() sends immediately. Awaiting the supertest promise would wait
+      // until the held updateOne finishes, which is the signal we need first.
+      lowerPublish = new Promise((resolve, reject) => {
+        http()
+          .post('/api/sites')
+          .send({
+            authorId,
+            address: 'forward.zz',
+            title: 'Low',
+            html: '<p>low</p>',
+          })
+          .end((err, res) => {
+            if (err) {
+              reject(err);
+              return;
+            }
+            resolve(res);
+          });
+      });
+      let timeout: NodeJS.Timeout | undefined;
+      try {
+        await Promise.race([
+          lowerStarted,
+          new Promise<never>((_resolve, reject) => {
+            timeout = setTimeout(
+              () => reject(new Error('updateOne was not called')),
+              5000,
+            );
+          }),
+        ]);
+      } finally {
+        if (timeout !== undefined) {
+          clearTimeout(timeout);
+        }
+      }
+      const higher = await http().post('/api/sites').send({
+        authorId,
+        address: 'forward.zz',
+        title: 'High',
+        html: '<p>high</p>',
+      });
+      expect(higher.status).toBe(201);
+      releaseLower();
+      const lower = await lowerPublish;
+      expect(lower.status).toBe(201);
+
+      const higherRevision = await revisions
+        .findById(higher.body.revisionId as string)
+        .exec();
+      const lowerRevision = await revisions
+        .findById(lower.body.revisionId as string)
+        .exec();
+      expect(higherRevision).not.toBeNull();
+      expect(lowerRevision).not.toBeNull();
+      expect(higherRevision?.number).toBeGreaterThan(lowerRevision?.number ?? 0);
+      const site = await sites.findOne({ address: 'forward.zz' }).exec();
+      expect(site?.currentRevisionId?.toString()).toBe(
+        higherRevision?._id.toString(),
+      );
+      expect(site?.currentNumber).toBe(higherRevision?.number);
+      expect(site?.title).toBe(higherRevision?.title);
+      expect(site?.text).toBe(higherRevision?.text);
+
+      const resolved = await http()
+        .get('/api/resolve')
+        .query({ address: 'forward.zz' });
+      expect(resolved.status).toBe(200);
+      expect(resolved.body.revisionId).toBe(higher.body.revisionId);
+      expect(resolved.body.title).toBe(higherRevision?.title);
+    } finally {
+      releaseLower();
+      spy.mockRestore();
+      await lowerPublish?.catch(() => undefined);
+    }
   });
 
   it('revisions returns 404 for a malformed id', async () => {
