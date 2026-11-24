@@ -56,15 +56,10 @@ export class SitesService {
   }
 
   async revision(id: string): Promise<PublishedPage> {
-    if (!Types.ObjectId.isValid(id)) {
+    if (!/^[0-9a-f]{24}$/i.test(id)) {
       throw new NotFoundException();
     }
-    let found: RevisionDocument | null;
-    try {
-      found = await this.revisions.findById(id).exec();
-    } catch {
-      throw new NotFoundException();
-    }
+    const found = await this.revisions.findById(id).exec();
     if (found === null) {
       throw new NotFoundException();
     }
@@ -122,24 +117,31 @@ export class SitesService {
         createdAt: new Date(),
       });
     } catch (error) {
-      if (isDuplicateKey(error)) {
+      if (!isDuplicateKey(error)) {
+        throw error;
+      }
+      const claimed = await this.sites.findOne({ address }).exec();
+      if (claimed === null) {
+        throw error;
+      }
+      if (!claimed.authorId.equals(dto.authorId)) {
         throw new ConflictException('address is owned by a different author');
       }
-      throw error;
+      return this.appendRevision(claimed, {
+        address,
+        title,
+        html,
+        text,
+        authorId: author._id,
+      });
     }
-    const created = await this.revisions.create({
-      siteId: site._id,
+    return this.appendRevision(site, {
       address,
-      number: 1,
       title,
       html,
       text,
       authorId: author._id,
-      createdAt: new Date(),
     });
-    site.currentRevisionId = created._id;
-    await site.save();
-    return { address, revisionId: created._id.toString() };
   }
 
   private async appendRevision(
@@ -152,25 +154,44 @@ export class SitesService {
       authorId: Types.ObjectId;
     },
   ): Promise<{ address: string; revisionId: string }> {
-    const latest = await this.revisions
-      .findOne({ siteId: site._id })
-      .sort({ number: -1 })
-      .exec();
-    const created = await this.revisions.create({
-      siteId: site._id,
-      address: content.address,
-      number: (latest?.number ?? 0) + 1,
-      title: content.title,
-      html: content.html,
-      text: content.text,
-      authorId: content.authorId,
-      createdAt: new Date(),
-    });
-    site.currentRevisionId = created._id;
-    site.title = content.title;
-    site.text = content.text;
-    await site.save();
-    return { address: content.address, revisionId: created._id.toString() };
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      const latest = await this.revisions
+        .findOne({ siteId: site._id })
+        .sort({ number: -1 })
+        .exec();
+      let created: RevisionDocument;
+      try {
+        created = await this.revisions.create({
+          siteId: site._id,
+          address: content.address,
+          number: (latest?.number ?? 0) + 1,
+          title: content.title,
+          html: content.html,
+          text: content.text,
+          authorId: content.authorId,
+          createdAt: new Date(),
+        });
+      } catch (error) {
+        if (isDuplicateKey(error)) {
+          continue;
+        }
+        throw error;
+      }
+      await this.sites
+        .updateOne(
+          { _id: site._id },
+          {
+            $set: {
+              currentRevisionId: created._id,
+              title: content.title,
+              text: content.text,
+            },
+          },
+        )
+        .exec();
+      return { address: content.address, revisionId: created._id.toString() };
+    }
+    throw new ConflictException('publish conflict, try again');
   }
 
   private async toPage(revision: RevisionDocument): Promise<PublishedPage> {

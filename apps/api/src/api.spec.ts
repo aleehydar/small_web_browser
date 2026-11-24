@@ -6,6 +6,8 @@ import { Types, type Connection, type Model } from 'mongoose';
 import request from 'supertest';
 import { PeopleModule } from './people/people.module';
 import { Person } from './people/person.schema';
+import { Revision } from './sites/revision.schema';
+import { Site } from './sites/site.schema';
 import { SitesModule } from './sites/sites.module';
 
 const TEST_URI =
@@ -336,8 +338,67 @@ describe('http api', () => {
     ]);
   });
 
+  it('same author publishing a new address twice concurrently gets revisions 1 and 2', async () => {
+    const authorId = await createAuthor('ada', 'Ada Lovelace');
+    const [left, right] = await Promise.all([
+      http().post('/api/sites').send({
+        authorId,
+        address: 'double.zz',
+        title: 'One',
+        html: '<p>One</p>',
+      }),
+      http().post('/api/sites').send({
+        authorId,
+        address: 'double.zz',
+        title: 'Two',
+        html: '<p>Two</p>',
+      }),
+    ]);
+    expect(left.status).toBe(201);
+    expect(right.status).toBe(201);
+    const sites = app.get<Model<Site>>(getModelToken(Site.name));
+    const revisions = app.get<Model<Revision>>(getModelToken(Revision.name));
+    expect(await sites.countDocuments().exec()).toBe(1);
+    const stored = await revisions.find().sort({ number: 1 }).exec();
+    expect(stored.map((revision) => revision.number)).toEqual([1, 2]);
+  });
+
+  it('five concurrent republishes get distinct consecutive revision numbers', async () => {
+    const authorId = await createAuthor('ada', 'Ada Lovelace');
+    const first = await http().post('/api/sites').send({
+      authorId,
+      address: 'republish.zz',
+      title: 'Base',
+      html: '<p>Base</p>',
+    });
+    expect(first.status).toBe(201);
+    const responses = await Promise.all(
+      [1, 2, 3, 4, 5].map((n) =>
+        http().post('/api/sites').send({
+          authorId,
+          address: 'republish.zz',
+          title: `Rev ${n}`,
+          html: `<p>${n}</p>`,
+        }),
+      ),
+    );
+    expect(responses.map((response) => response.status)).toEqual([
+      201, 201, 201, 201, 201,
+    ]);
+    const revisions = app.get<Model<Revision>>(getModelToken(Revision.name));
+    const stored = await revisions.find().sort({ number: 1 }).exec();
+    expect(stored.map((revision) => revision.number)).toEqual([
+      1, 2, 3, 4, 5, 6,
+    ]);
+  });
+
   it('revisions returns 404 for a malformed id', async () => {
     const response = await http().get('/api/revisions/not-an-id');
+    expect(response.status).toBe(404);
+  });
+
+  it('revisions returns 404 for a 12-character id', async () => {
+    const response = await http().get('/api/revisions/abcdefghijkl');
     expect(response.status).toBe(404);
   });
 
