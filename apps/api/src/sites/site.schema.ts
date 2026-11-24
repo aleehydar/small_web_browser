@@ -27,3 +27,8 @@ export class Site {
 
 export type SiteDocument = HydratedDocument<Site>;
 export const SiteSchema = SchemaFactory.createForClass(Site);
+
+SiteSchema.index(
+  { title: 'text', text: 'text' },
+  { weights: { title: 10, text: 1 }, default_language: 'none' },
+);

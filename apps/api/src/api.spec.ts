@@ -7,6 +7,7 @@ import { Types, type Connection, type Model } from 'mongoose';
 import request from 'supertest';
 import { PeopleModule } from './people/people.module';
 import { Person } from './people/person.schema';
+import { SearchModule } from './search/search.module';
 import { Revision } from './sites/revision.schema';
 import { Site } from './sites/site.schema';
 import { SitesModule } from './sites/sites.module';
@@ -33,6 +34,7 @@ describe('http api', () => {
         MongooseModule.forRoot(TEST_URI, { serverSelectionTimeoutMS: 5000 }),
         PeopleModule,
         SitesModule,
+        SearchModule,
       ],
     }).compile();
     app = moduleRef.createNestApplication();
@@ -511,6 +513,159 @@ describe('http api', () => {
       `/api/revisions/${new Types.ObjectId().toHexString()}`,
     );
     expect(response.status).toBe(404);
+  });
+
+  function body(word: string, fillerCount: number): string {
+    return [word, ...Array.from({ length: fillerCount }, () => 'alpha')].join(
+      ' ',
+    );
+  }
+
+  async function publish(
+    authorId: string,
+    address: string,
+    title: string,
+    html: string,
+  ): Promise<void> {
+    const response = await http().post('/api/sites').send({
+      authorId,
+      address,
+      title,
+      html,
+    });
+    expect(response.status).toBe(201);
+  }
+
+  it('search ranks a title match above repeated body matches above one body match', async () => {
+    const authorId = await createAuthor('ada', 'Ada Lovelace');
+    const bodyA = body('kelp', 29);
+    const bodyB = ['kelp', 'kelp', 'kelp', ...Array.from({ length: 27 }, () => 'alpha')].join(
+      ' ',
+    );
+    const bodyC = body('kelp', 29);
+    await publish(authorId, 'a.zz', 'kelp tide', `<p>${bodyA}</p>`);
+    await publish(authorId, 'b.zz', 'sand tide', `<p>${bodyB}</p>`);
+    await publish(authorId, 'c.zz', 'rock tide', `<p>${bodyC}</p>`);
+
+    const response = await http().get('/api/search').query({ q: 'kelp' });
+    expect(response.status).toBe(200);
+    expect(response.body.results.map((hit: { address: string }) => hit.address)).toEqual([
+      'a.zz',
+      'b.zz',
+      'c.zz',
+    ]);
+  });
+
+  it('search follows a republish and drops the old wording', async () => {
+    const authorId = await createAuthor('ada', 'Ada Lovelace');
+    await publish(authorId, 'tide.zz', 'Tide', '<p>kelp forest</p>');
+    const before = await http().get('/api/search').query({ q: 'kelp' });
+    expect(before.body.results.map((hit: { address: string }) => hit.address)).toEqual([
+      'tide.zz',
+    ]);
+
+    await publish(authorId, 'tide.zz', 'Tide', '<p>otter forest</p>');
+    const kelp = await http().get('/api/search').query({ q: 'kelp' });
+    expect(kelp.status).toBe(200);
+    expect(kelp.body.results).toEqual([]);
+    const otter = await http().get('/api/search').query({ q: 'otter' });
+    expect(otter.body.results.map((hit: { address: string }) => hit.address)).toEqual([
+      'tide.zz',
+    ]);
+  });
+
+  it('search skips a site with no current revision', async () => {
+    const authorId = await createAuthor('ada', 'Ada Lovelace');
+    await publish(authorId, 'visible.zz', 'Visible kelp', '<p>kelp</p>');
+    const sites = app.get<Model<Site>>(getModelToken(Site.name));
+    await sites.create({
+      address: 'hidden.zz',
+      authorId: new Types.ObjectId(authorId),
+      currentRevisionId: null,
+      currentNumber: 0,
+      title: 'hidden kelp',
+      text: 'kelp kelp kelp',
+      createdAt: new Date(),
+    });
+
+    const response = await http().get('/api/search').query({ q: 'kelp' });
+    expect(response.status).toBe(200);
+    expect(response.body.results.map((hit: { address: string }) => hit.address)).toEqual([
+      'visible.zz',
+    ]);
+  });
+
+  it('search returns an empty list when nothing matches', async () => {
+    const authorId = await createAuthor('ada', 'Ada Lovelace');
+    await publish(authorId, 'tide.zz', 'Tide', '<p>kelp forest</p>');
+    const response = await http().get('/api/search').query({ q: 'zzzxxx' });
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({ query: 'zzzxxx', results: [] });
+  });
+
+  it('search returns 400 when q is missing', async () => {
+    const response = await http().get('/api/search');
+    expect(response.status).toBe(400);
+  });
+    it('search limits q to 200 characters after trimming', async () => {
+    const padded = `${' '.repeat(50)}${'a'.repeat(200)}`;
+    const ok = await http().get('/api/search').query({ q: padded });
+    expect(ok.status).toBe(200);
+    const tooLong = await http().get('/api/search').query({ q: 'a'.repeat(201) });
+    expect(tooLong.status).toBe(400);
+  });
+
+  it('search returns an empty list for a blank query', async () => {
+    const response = await http().get('/api/search').query({ q: '   ' });
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({ query: '', results: [] });
+  });
+
+  it('search treats a leading minus as text, not an operator', async () => {
+    const authorId = await createAuthor('ada', 'Ada Lovelace');
+    await publish(authorId, 'tide.zz', 'Tide', '<p>kelp forest</p>');
+    const plain = await http().get('/api/search').query({ q: 'kelp' });
+    const negated = await http().get('/api/search').query({ q: '-kelp' });
+    expect(negated.status).toBe(200);
+    expect(negated.body.results).toEqual(plain.body.results);
+  });
+
+  it('search uses only the first eight words', async () => {
+    const authorId = await createAuthor('ada', 'Ada Lovelace');
+    await publish(authorId, 'alpha.zz', 'Alpha', '<p>alpha</p>');
+    await publish(authorId, 'hotel.zz', 'Hotel', '<p>hotel</p>');
+    await publish(authorId, 'omega.zz', 'Omega', '<p>omega</p>');
+    const response = await http().get('/api/search').query({
+      q: 'alpha bravo charlie delta echo foxtrot golf hotel omega',
+    });
+    expect(response.status).toBe(200);
+    const addresses = response.body.results.map(
+      (hit: { address: string }) => hit.address,
+    );
+    expect(addresses).toContain('alpha.zz');
+    expect(addresses).toContain('hotel.zz');
+    expect(addresses).not.toContain('omega.zz');
+  });
+
+  it('search snippet segments are plain text and mark the query token', async () => {
+    const authorId = await createAuthor('ada', 'Ada Lovelace');
+    await publish(authorId, 'tide.zz', 'Tide', '<p>The Kelp forest</p>');
+    const response = await http().get('/api/search').query({ q: 'kelp' });
+    expect(response.status).toBe(200);
+    const hit = response.body.results[0] as {
+      snippet: { text: string; match: boolean }[];
+    };
+    expect(hit.snippet.length).toBeGreaterThan(0);
+    for (const segment of hit.snippet) {
+      expect(Object.keys(segment).sort()).toEqual(['match', 'text']);
+      expect(typeof segment.text).toBe('string');
+      expect(typeof segment.match).toBe('boolean');
+    }
+    const matched = hit.snippet.filter((segment) => segment.match);
+    expect(matched.length).toBeGreaterThan(0);
+    for (const segment of matched) {
+      expect(segment.text.toLowerCase()).toBe('kelp');
+    }
   });
 
   it('people are sorted by name', async () => {
