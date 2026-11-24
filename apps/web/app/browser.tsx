@@ -3,10 +3,12 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   type FormEvent,
   type ReactNode,
+  type RefObject,
 } from "react";
 import {
   ApiError,
@@ -28,6 +30,7 @@ import {
   emptySession,
   forward,
   push,
+  saveScroll,
   type SearchHit,
   type Via,
 } from "../lib/session";
@@ -65,8 +68,18 @@ export default function Browser() {
   const [publishError, setPublishError] = useState<string | null>(null);
   const [publishing, setPublishing] = useState(false);
   const flight = useRef(0);
+  const frameRef = useRef<HTMLIFrameElement>(null);
+  const resultsRef = useRef<HTMLDivElement>(null);
 
   const entry = current(session);
+
+  useLayoutEffect(() => {
+    if (phase !== "idle" || publishOpen) return;
+    if (entry?.kind !== "search") return;
+    const node = resultsRef.current;
+    if (node === null) return;
+    node.scrollTop = entry.scrollTop;
+  }, [entry, phase, publishOpen]);
 
   useEffect(() => {
     let cancelled = false;
@@ -160,17 +173,25 @@ export default function Browser() {
     setPending("");
   }, []);
 
+  const leaveCurrent = useCallback(() => {
+    const top = readShownScroll(frameRef.current, resultsRef.current);
+    if (top === null) return;
+    setSession((value) => saveScroll(value, top));
+  }, []);
+
   const goBack = useCallback(() => {
+    leaveCurrent();
     cancelFlight();
     setError(null);
     setSession((value) => back(value));
-  }, [cancelFlight]);
+  }, [cancelFlight, leaveCurrent]);
 
   const goForward = useCallback(() => {
+    leaveCurrent();
     cancelFlight();
     setError(null);
     setSession((value) => forward(value));
-  }, [cancelFlight]);
+  }, [cancelFlight, leaveCurrent]);
 
   useEffect(() => {
     function onKey(event: KeyboardEvent) {
@@ -197,6 +218,7 @@ export default function Browser() {
         setError("Choose who is browsing.");
         return;
       }
+      leaveCurrent();
       const id = ++flight.current;
       setAddressDraft(address);
       setPhase("loading");
@@ -230,6 +252,7 @@ export default function Browser() {
             authorName: page.authorName,
             publishedAt: page.publishedAt,
             document: page.document,
+            scrollTop: 0,
           }),
         );
       } catch (cause: unknown) {
@@ -251,7 +274,7 @@ export default function Browser() {
         }
       }
     },
-    [personId],
+    [leaveCurrent, personId],
   );
 
   const openAddressRef = useRef(openAddress);
@@ -259,12 +282,14 @@ export default function Browser() {
     openAddressRef.current = openAddress;
   });
   const openLink = useCallback((address: string) => {
+    leaveCurrent();
     void openAddressRef.current(address, "link");
-  }, []);
+  }, [leaveCurrent]);
 
   async function runSearch(raw: string) {
     const query = raw.trim();
     if (query === "") return;
+    leaveCurrent();
     const id = ++flight.current;
     setSearchDraft(query);
     setPhase("loading");
@@ -280,6 +305,7 @@ export default function Browser() {
           kind: "search",
           query: found.query,
           results: found.results,
+          scrollTop: 0,
         }),
       );
     } catch (cause: unknown) {
@@ -310,6 +336,7 @@ export default function Browser() {
 
   async function onPublish(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    leaveCurrent();
     if (
       authorId === "" ||
       publishAddress.trim() === "" ||
@@ -432,6 +459,7 @@ export default function Browser() {
             className="publish-button"
             aria-expanded={publishOpen}
             onClick={() => {
+              if (!publishOpen) leaveCurrent();
               setPublishOpen((open) => !open);
               setPublishError(null);
               if (authorId === "" && personId !== "") setAuthorId(personId);
@@ -544,16 +572,22 @@ export default function Browser() {
               </div>
               <PageFrame
                 key={session.index}
+                frameRef={frameRef}
                 documentHtml={entry.document}
                 title={entry.title}
+                scrollTop={entry.scrollTop}
                 onLink={openLink}
               />
             </>
           ) : entry?.kind === "search" ? (
             <SearchResults
+              scrollerRef={resultsRef}
               query={entry.query}
               results={entry.results}
-              onOpen={(address) => void openAddress(address, "search")}
+              onOpen={(address) => {
+                leaveCurrent();
+                void openAddress(address, "search");
+              }}
             />
           ) : entry?.kind === "missing" ? (
             <Status
@@ -576,7 +610,10 @@ export default function Browser() {
                   <button
                     key={address}
                     type="button"
-                    onClick={() => void openAddress(address, "typed")}
+                    onClick={() => {
+                      leaveCurrent();
+                      void openAddress(address, "typed");
+                    }}
                   >
                     {address}
                   </button>
@@ -614,7 +651,10 @@ export default function Browser() {
                   <button
                     type="button"
                     className={active ? "visit active" : "visit"}
-                    onClick={() => void openAddress(visit.address, "history")}
+                    onClick={() => {
+                      leaveCurrent();
+                      void openAddress(visit.address, "history");
+                    }}
                   >
                     <span className="visit-title">{visit.title}</span>
                     <span className="visit-address">{visit.address}</span>
@@ -646,16 +686,21 @@ export default function Browser() {
 }
 
 function PageFrame({
+  frameRef,
   documentHtml,
   title,
+  scrollTop,
   onLink,
 }: {
+  frameRef: RefObject<HTMLIFrameElement | null>;
   documentHtml: string;
   title: string;
+  scrollTop: number;
   onLink: (address: string) => void;
 }) {
   return (
     <iframe
+      ref={frameRef}
       className="page-frame"
       title={title}
       sandbox="allow-same-origin"
@@ -665,35 +710,42 @@ function PageFrame({
         const doc = event.currentTarget.contentDocument;
         if (doc === null) return;
         const FrameElement = doc.defaultView?.Element;
-        if (FrameElement === undefined) return;
-        doc.addEventListener("click", (click) => {
-          const target = click.target;
-          // The frame is a nested window, so the parent's Element rejects it.
-          if (!(target instanceof FrameElement)) return;
-          const anchor = target.closest("a");
-          if (anchor === null) return;
-          click.preventDefault();
-          const address = anchor.getAttribute("data-addr");
-          if (address !== null && address !== "") {
-            onLink(address);
-          }
-        });
+        if (FrameElement !== undefined) {
+          doc.addEventListener("click", (click) => {
+            const target = click.target;
+            // The frame is a nested window, so the parent's Element rejects it.
+            if (!(target instanceof FrameElement)) return;
+            const anchor = target.closest("a");
+            if (anchor === null) return;
+            click.preventDefault();
+            const address = anchor.getAttribute("data-addr");
+            if (address !== null && address !== "") {
+              onLink(address);
+            }
+          });
+        }
+        const scrolling = doc.scrollingElement ?? doc.documentElement;
+        if (scrolling !== null) {
+          scrolling.scrollTop = scrollTop;
+        }
       }}
     />
   );
 }
 
 function SearchResults({
+  scrollerRef,
   query,
   results,
   onOpen,
 }: {
+  scrollerRef: RefObject<HTMLDivElement | null>;
   query: string;
   results: SearchHit[];
   onOpen: (address: string) => void;
 }) {
   return (
-    <div className="results">
+    <div className="results" ref={scrollerRef}>
       <p className="kicker">Search</p>
       <h1>{query}</h1>
       <p className="lede">
@@ -754,6 +806,23 @@ function formatWhen(iso: string): string {
     hour: "numeric",
     minute: "2-digit",
   }).format(date);
+}
+
+function readShownScroll(
+  frame: HTMLIFrameElement | null,
+  results: HTMLDivElement | null,
+): number | null {
+  if (frame !== null && frame.isConnected) {
+    const doc = frame.contentDocument;
+    if (doc === null) return null;
+    const scrolling = doc.scrollingElement ?? doc.documentElement;
+    if (scrolling === null) return null;
+    return scrolling.scrollTop;
+  }
+  if (results !== null && results.isConnected) {
+    return results.scrollTop;
+  }
+  return null;
 }
 
 function messageOf(cause: unknown): string {
