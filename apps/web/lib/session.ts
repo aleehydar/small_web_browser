@@ -20,6 +20,7 @@ export type PageEntry = {
   authorName: string;
   publishedAt: string;
   document: string;
+  scrollTop: number;
 };
 
 export type MissingEntry = {
@@ -31,6 +32,7 @@ export type SearchEntry = {
   kind: "search";
   query: string;
   results: SearchHit[];
+  scrollTop: number;
 };
 
 export type Entry = PageEntry | MissingEntry | SearchEntry;
@@ -75,4 +77,18 @@ export function forward(session: Session): Session {
     return session;
   }
   return { entries: session.entries, index: session.index + 1 };
+}
+
+export function saveScroll(session: Session, scrollTop: number): Session {
+  const entry = current(session);
+  if (entry === null || entry.kind === "missing") {
+    return session;
+  }
+  const top = Number.isFinite(scrollTop) && scrollTop > 0 ? scrollTop : 0;
+  if (entry.scrollTop === top) {
+    return session;
+  }
+  const entries = session.entries.slice();
+  entries[session.index] = { ...entry, scrollTop: top };
+  return { entries, index: session.index };
 }
