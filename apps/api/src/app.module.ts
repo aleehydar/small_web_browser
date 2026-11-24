@@ -3,6 +3,8 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { MongooseModule } from '@nestjs/mongoose';
 import { join } from 'node:path';
 import { HealthController } from './health.controller';
+import { PeopleModule } from './people/people.module';
+import { SitesModule } from './sites/sites.module';
 
 @Module({
   imports: [
@@ -17,6 +19,8 @@ import { HealthController } from './health.controller';
         uri: config.getOrThrow<string>('MONGO_URI'),
       }),
     }),
+    PeopleModule,
+    SitesModule,
   ],
   controllers: [HealthController],
 })
