@@ -11,6 +11,8 @@ import { SearchModule } from './search/search.module';
 import { Revision } from './sites/revision.schema';
 import { Site } from './sites/site.schema';
 import { SitesModule } from './sites/sites.module';
+import { Visit } from './visits/visit.schema';
+import { VisitsModule } from './visits/visits.module';
 
 const TEST_URI =
   process.env.MONGO_TEST_URI ?? 'mongodb://localhost:27017/smallweb_test';
@@ -26,6 +28,7 @@ describe('http api', () => {
   let app: INestApplication;
   let connection: Connection;
   let people: Model<Person>;
+  let visits: Model<Visit>;
 
   beforeAll(async () => {
     assertTestUri(TEST_URI);
@@ -35,6 +38,7 @@ describe('http api', () => {
         PeopleModule,
         SitesModule,
         SearchModule,
+        VisitsModule,
       ],
     }).compile();
     app = moduleRef.createNestApplication();
@@ -54,6 +58,7 @@ describe('http api', () => {
       );
     }
     people = app.get<Model<Person>>(getModelToken(Person.name));
+    visits = app.get<Model<Visit>>(getModelToken(Visit.name));
   }, 20000);
 
   beforeEach(async () => {
@@ -666,6 +671,374 @@ describe('http api', () => {
     for (const segment of matched) {
       expect(segment.text.toLowerCase()).toBe('kelp');
     }
+  });
+
+  async function publishRevision(
+    authorId: string,
+    address: string,
+    title: string,
+  ): Promise<string> {
+    const response = await http().post('/api/sites').send({
+      authorId,
+      address,
+      title,
+      html: '<p>Rising</p>',
+    });
+    expect(response.status).toBe(201);
+    return response.body.revisionId as string;
+  }
+
+  it('post visit returns 201 with the revision address and title', async () => {
+    const personId = await createAuthor('ada', 'Ada Lovelace');
+    const revisionId = await publishRevision(personId, 'tidepool.zz', 'Tides');
+    const response = await http().post('/api/visits').send({
+      personId,
+      revisionId,
+      via: 'typed',
+      clientNavId: 'nav-1',
+    });
+    expect(response.status).toBe(201);
+    expect(response.body).toEqual({
+      id: expect.any(String) as string,
+      address: 'tidepool.zz',
+      title: 'Tides',
+      via: 'typed',
+      at: expect.any(String) as string,
+    });
+    expect(Number.isNaN(Date.parse(response.body.at as string))).toBe(false);
+  });
+
+  it('post visit returns 400 when address is sent', async () => {
+    const personId = await createAuthor('ada', 'Ada Lovelace');
+    const revisionId = await publishRevision(personId, 'tidepool.zz', 'Tides');
+    const response = await http().post('/api/visits').send({
+      personId,
+      revisionId,
+      via: 'typed',
+      clientNavId: 'nav-1',
+      address: 'tidepool.zz',
+    });
+    expect(response.status).toBe(400);
+  });
+
+  it('replaying the same person and clientNavId returns 200 and the same id', async () => {
+    const personId = await createAuthor('ada', 'Ada Lovelace');
+    const revisionId = await publishRevision(personId, 'tidepool.zz', 'Tides');
+    const body = {
+      personId,
+      revisionId,
+      via: 'link',
+      clientNavId: 'nav-1',
+    };
+    const first = await http().post('/api/visits').send(body);
+    const second = await http().post('/api/visits').send(body);
+    expect(first.status).toBe(201);
+    expect(second.status).toBe(200);
+    expect(second.body).toEqual(first.body);
+    expect(await visits.countDocuments()).toBe(1);
+  });
+
+  it('twenty concurrent posts of one navigation create one visit', async () => {
+    const personId = await createAuthor('ada', 'Ada Lovelace');
+    const revisionId = await publishRevision(personId, 'tidepool.zz', 'Tides');
+    const body = {
+      personId,
+      revisionId,
+      via: 'search',
+      clientNavId: 'nav-race',
+    };
+    const responses = await Promise.all(
+      Array.from({ length: 20 }, () => http().post('/api/visits').send(body)),
+    );
+    const statuses = responses.map((response) => response.status);
+    expect(statuses.filter((status) => status === 201)).toHaveLength(1);
+    expect(statuses.filter((status) => status === 200)).toHaveLength(19);
+    const ids = responses.map((response) => response.body.id as string);
+    expect(new Set(ids).size).toBe(1);
+    expect(await visits.countDocuments()).toBe(1);
+  });
+
+  it('the same clientNavId for two people creates two visits', async () => {
+    const ada = await createAuthor('ada', 'Ada Lovelace');
+    const grace = await createAuthor('grace', 'Grace Hopper');
+    const revisionId = await publishRevision(ada, 'tidepool.zz', 'Tides');
+    const first = await http().post('/api/visits').send({
+      personId: ada,
+      revisionId,
+      via: 'typed',
+      clientNavId: 'shared',
+    });
+    const second = await http().post('/api/visits').send({
+      personId: grace,
+      revisionId,
+      via: 'typed',
+      clientNavId: 'shared',
+    });
+    expect(first.status).toBe(201);
+    expect(second.status).toBe(201);
+    expect(first.body.id).not.toBe(second.body.id);
+    expect(await visits.countDocuments()).toBe(2);
+  });
+
+  it('post visit returns 422 for an unknown person', async () => {
+    const personId = await createAuthor('ada', 'Ada Lovelace');
+    const revisionId = await publishRevision(personId, 'tidepool.zz', 'Tides');
+    const response = await http().post('/api/visits').send({
+      personId: '507f1f77bcf86cd799439011',
+      revisionId,
+      via: 'typed',
+      clientNavId: 'nav-1',
+    });
+    expect(response.status).toBe(422);
+  });
+
+  it('post visit returns 422 for an unknown revision', async () => {
+    const personId = await createAuthor('ada', 'Ada Lovelace');
+    const response = await http().post('/api/visits').send({
+      personId,
+      revisionId: '507f1f77bcf86cd799439011',
+      via: 'typed',
+      clientNavId: 'nav-1',
+    });
+    expect(response.status).toBe(422);
+  });
+
+  it('post visit returns 400 for a malformed person id', async () => {
+    const response = await http().post('/api/visits').send({
+      personId: 'not-an-id',
+      revisionId: '507f1f77bcf86cd799439011',
+      via: 'typed',
+      clientNavId: 'nav-1',
+    });
+    expect(response.status).toBe(400);
+  });
+
+  it('post visit returns 400 for a malformed revision id', async () => {
+    const personId = await createAuthor('ada', 'Ada Lovelace');
+    const response = await http().post('/api/visits').send({
+      personId,
+      revisionId: 'not-an-id',
+      via: 'typed',
+      clientNavId: 'nav-1',
+    });
+    expect(response.status).toBe(400);
+  });
+
+  it('post visit returns 400 for a bad via', async () => {
+    const personId = await createAuthor('ada', 'Ada Lovelace');
+    const revisionId = await publishRevision(personId, 'tidepool.zz', 'Tides');
+    const response = await http().post('/api/visits').send({
+      personId,
+      revisionId,
+      via: 'teleport',
+      clientNavId: 'nav-1',
+    });
+    expect(response.status).toBe(400);
+  });
+
+  it('post visit returns 400 for a bad clientNavId', async () => {
+    const personId = await createAuthor('ada', 'Ada Lovelace');
+    const revisionId = await publishRevision(personId, 'tidepool.zz', 'Tides');
+    const response = await http().post('/api/visits').send({
+      personId,
+      revisionId,
+      via: 'typed',
+      clientNavId: 'has space',
+    });
+    expect(response.status).toBe(400);
+  });
+
+  it('history is newest first', async () => {
+    const personId = await createAuthor('ada', 'Ada Lovelace');
+    const revisionId = new Types.ObjectId();
+    await visits.create({
+      _id: new Types.ObjectId('000000000000000000000001'),
+      personId,
+      address: 'old.zz',
+      revisionId,
+      title: 'Old',
+      via: 'typed',
+      clientNavId: 'old',
+      at: new Date('2026-01-01T00:00:00.000Z'),
+    });
+    await visits.create({
+      _id: new Types.ObjectId('000000000000000000000002'),
+      personId,
+      address: 'new.zz',
+      revisionId,
+      title: 'New',
+      via: 'link',
+      clientNavId: 'new',
+      at: new Date('2026-01-03T00:00:00.000Z'),
+    });
+    const response = await http().get(`/api/people/${personId}/history`);
+    expect(response.status).toBe(200);
+    expect(
+      response.body.items.map((item: { title: string }) => item.title),
+    ).toEqual(['New', 'Old']);
+  });
+
+  it('history is empty when a person has no visits', async () => {
+    const personId = await createAuthor('ada', 'Ada Lovelace');
+    const response = await http().get(`/api/people/${personId}/history`);
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({ items: [], nextCursor: null });
+  });
+
+  it('history pages of three stay complete when two visits share a timestamp', async () => {
+    const personId = await createAuthor('ada', 'Ada Lovelace');
+    const revisionId = new Types.ObjectId();
+    const shared = new Date('2026-06-03T00:00:00.000Z');
+    const rows = [
+      { n: 7, at: new Date('2026-06-07T00:00:00.000Z') },
+      { n: 6, at: new Date('2026-06-06T00:00:00.000Z') },
+      { n: 5, at: shared },
+      { n: 4, at: shared },
+      { n: 3, at: new Date('2026-06-02T00:00:00.000Z') },
+      { n: 2, at: new Date('2026-06-01T00:00:00.000Z') },
+      { n: 1, at: new Date('2026-05-31T00:00:00.000Z') },
+    ];
+    for (const row of rows) {
+      await visits.create({
+        _id: new Types.ObjectId(row.n.toString(16).padStart(24, '0')),
+        personId,
+        address: `s${row.n}.zz`,
+        revisionId,
+        title: `T${row.n}`,
+        via: 'history',
+        clientNavId: `nav-${row.n}`,
+        at: row.at,
+      });
+    }
+
+    const seen: string[] = [];
+    const pageSizes: number[] = [];
+    let cursor: string | undefined;
+    for (let page = 0; page < 5; page += 1) {
+      const response = await http()
+        .get(`/api/people/${personId}/history`)
+        .query({ limit: 3, ...(cursor === undefined ? {} : { cursor }) });
+      expect(response.status).toBe(200);
+      const items = response.body.items as { id: string; at: string }[];
+      pageSizes.push(items.length);
+      seen.push(...items.map((item) => item.id));
+      if (page === 0) {
+        expect(items[2]?.at).toBe(shared.toISOString());
+      }
+      if (page === 1) {
+        expect(items[0]?.at).toBe(shared.toISOString());
+      }
+      if (response.body.nextCursor === null) {
+        expect(page).toBe(2);
+        break;
+      }
+      cursor = response.body.nextCursor as string;
+    }
+
+    expect(pageSizes).toEqual([3, 3, 1]);
+    expect(seen).toEqual(
+      rows.map((row) => row.n.toString(16).padStart(24, '0')),
+    );
+    expect(new Set(seen).size).toBe(seen.length);
+  });
+
+  it('history does not include another person', async () => {
+    const ada = await createAuthor('ada', 'Ada Lovelace');
+    const grace = await createAuthor('grace', 'Grace Hopper');
+    const revisionId = new Types.ObjectId();
+    await visits.create({
+      personId: ada,
+      address: 'ada.zz',
+      revisionId,
+      title: 'Ada',
+      via: 'typed',
+      clientNavId: 'ada',
+      at: new Date('2026-01-01T00:00:00.000Z'),
+    });
+    await visits.create({
+      personId: grace,
+      address: 'grace.zz',
+      revisionId,
+      title: 'Grace',
+      via: 'typed',
+      clientNavId: 'grace',
+      at: new Date('2026-02-01T00:00:00.000Z'),
+    });
+    const response = await http().get(`/api/people/${ada}/history`);
+    expect(response.status).toBe(200);
+    expect(response.body.items).toEqual([
+      expect.objectContaining({ address: 'ada.zz', title: 'Ada' }),
+    ]);
+  });
+
+  it('history keeps the title of the visited revision after a republish', async () => {
+    const personId = await createAuthor('ada', 'Ada Lovelace');
+    const revisionId = await publishRevision(
+      personId,
+      'tidepool.zz',
+      'First title',
+    );
+    const recorded = await http().post('/api/visits').send({
+      personId,
+      revisionId,
+      via: 'link',
+      clientNavId: 'nav-1',
+    });
+    expect(recorded.status).toBe(201);
+    const republished = await http().post('/api/sites').send({
+      authorId: personId,
+      address: 'tidepool.zz',
+      title: 'Second title',
+      html: '<p>Later</p>',
+    });
+    expect(republished.status).toBe(201);
+    const history = await http().get(`/api/people/${personId}/history`);
+    expect(history.status).toBe(200);
+    expect(history.body.items).toEqual([
+      {
+        id: recorded.body.id,
+        address: 'tidepool.zz',
+        title: 'First title',
+        via: 'link',
+        at: recorded.body.at,
+      },
+    ]);
+  });
+
+  it('history returns 404 for an unknown person', async () => {
+    const response = await http().get(
+      '/api/people/507f1f77bcf86cd799439011/history',
+    );
+    expect(response.status).toBe(404);
+  });
+
+  it('history returns 404 for a malformed id', async () => {
+    const response = await http().get('/api/people/abcdefghijkl/history');
+    expect(response.status).toBe(404);
+  });
+
+  it('history returns 400 for limit 0', async () => {
+    const personId = await createAuthor('ada', 'Ada Lovelace');
+    const response = await http()
+      .get(`/api/people/${personId}/history`)
+      .query({ limit: 0 });
+    expect(response.status).toBe(400);
+  });
+
+  it('history returns 400 for limit 101', async () => {
+    const personId = await createAuthor('ada', 'Ada Lovelace');
+    const response = await http()
+      .get(`/api/people/${personId}/history`)
+      .query({ limit: 101 });
+    expect(response.status).toBe(400);
+  });
+
+  it('history returns 400 for a garbage cursor', async () => {
+    const personId = await createAuthor('ada', 'Ada Lovelace');
+    const response = await http()
+      .get(`/api/people/${personId}/history`)
+      .query({ cursor: 'not-a-cursor' });
+    expect(response.status).toBe(400);
   });
 
   it('people are sorted by name', async () => {

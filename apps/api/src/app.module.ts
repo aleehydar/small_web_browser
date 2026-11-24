@@ -6,6 +6,7 @@ import { HealthController } from './health.controller';
 import { PeopleModule } from './people/people.module';
 import { SearchModule } from './search/search.module';
 import { SitesModule } from './sites/sites.module';
+import { VisitsModule } from './visits/visits.module';
 
 @Module({
   imports: [
@@ -23,6 +24,7 @@ import { SitesModule } from './sites/sites.module';
     PeopleModule,
     SitesModule,
     SearchModule,
+    VisitsModule,
   ],
   controllers: [HealthController],
 })
