@@ -8,6 +8,7 @@ Docker
 cp .env.example .env
 docker compose up -d
 npm install
+npm run seed
 npm run dev:api
 npm run dev:web
 
