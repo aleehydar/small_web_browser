@@ -215,7 +215,7 @@ export default function Browser() {
       const address = raw.trim();
       if (address === "") return;
       if (personId === "") {
-        setError("Choose who is browsing.");
+        setError("Choose a person.");
         return;
       }
       leaveCurrent();
@@ -368,15 +368,12 @@ export default function Browser() {
     }
   }
 
-  const person = people.find((item) => item.id === personId);
-
   return (
     <div className="shell">
       <header className="chrome">
         <div className="brand-row">
           <div className="brand">
             <p className="wordmark">Small Web</p>
-            <p className="brand-note">A page lives at an address, and nowhere else.</p>
           </div>
           <label className="person">
             <span>Browsing as</span>
@@ -446,11 +443,11 @@ export default function Browser() {
             }}
           >
             <label className="grow">
-              <span className="sr">Search the text of every page</span>
+              <span className="sr">Search</span>
               <input
                 value={searchDraft}
                 onChange={(event) => setSearchDraft(event.target.value)}
-                placeholder="Search what the pages say"
+                placeholder="Search"
                 enterKeyHint="search"
               />
             </label>
@@ -479,7 +476,7 @@ export default function Browser() {
       ) : null}
       {notice !== null ? (
         <p className="banner notice" role="status">
-          The page is open. The visit was not recorded: {notice}
+          Visit not recorded: {notice}
         </p>
       ) : null}
 
@@ -489,15 +486,13 @@ export default function Browser() {
             <Status
               kicker="Loading"
               title={pending}
-              body="Asked for, not shown yet."
+              body=""
             />
           ) : publishOpen ? (
             <form className="publish" onSubmit={(event) => void onPublish(event)}>
-              <p className="kicker">Publish</p>
-              <h1>Put a page at an address.</h1>
+              <h1>Publish</h1>
               <p className="lede">
-                The HTML is sanitized before it is stored. Scripts, event
-                handlers, and addresses outside <code>.zz</code> do not survive.
+                Scripts and addresses outside <code>.zz</code> are removed.
               </p>
               <label>
                 Author
@@ -527,7 +522,7 @@ export default function Browser() {
                 <input
                   value={publishTitle}
                   onChange={(event) => setPublishTitle(event.target.value)}
-                  placeholder="A name for the page"
+                  placeholder="Title"
                   maxLength={120}
                 />
               </label>
@@ -593,19 +588,15 @@ export default function Browser() {
             />
           ) : entry?.kind === "missing" ? (
             <Status
-              kicker="Nowhere"
+              kicker=""
               title={entry.address}
-              body="No such address. Nothing was published here, so this stop was not added to history."
+              body="No page at this address."
             />
           ) : (
             <Status
-              kicker="Start"
-              title="Where do you want to read?"
-              body={
-                person === undefined
-                  ? "Seed the web, then pick a person. History belongs to whoever is browsing."
-                  : `${person.name} is browsing. Type an address, or start from one of these.`
-              }
+              kicker=""
+              title=""
+              body="Enter an address above."
             >
               <div className="hints">
                 {["tidepool.zz", "harbor.zz", "atlas.zz"].map((address) => (
@@ -628,11 +619,7 @@ export default function Browser() {
         <aside className="history" aria-label="History">
           <div className="history-head">
             <h2>History</h2>
-            <p>
-              {person === undefined
-                ? "Per person, newest first."
-                : `${person.name}, newest first. A row opens the address as it is now.`}
-            </p>
+            <p>Newest first.</p>
           </div>
           {historyError !== null ? (
             <p className="history-note" role="alert">
@@ -752,8 +739,8 @@ function SearchResults({
       <h1>{query}</h1>
       <p className="lede">
         {results.length === 0
-          ? "Nothing in the web matches those words."
-          : `${results.length} ${results.length === 1 ? "page" : "pages"}, ranked by the words in them.`}
+          ? "No results."
+          : `${results.length} ${results.length === 1 ? "page" : "pages"}`}
       </p>
       <ol className="hits">
         {results.map((hit) => (
