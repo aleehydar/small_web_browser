@@ -229,19 +229,6 @@ export default function Browser() {
       try {
         const page = await resolveAddress(address);
         if (flight.current !== id) return;
-        try {
-          await recordVisit({
-            personId,
-            revisionId: page.revisionId,
-            via,
-            clientNavId: navigationId(),
-          });
-          if (flight.current !== id) return;
-          setHistoryVersion((version) => version + 1);
-        } catch (cause: unknown) {
-          if (flight.current !== id) return;
-          setNotice(messageOf(cause));
-        }
         setSession((value) =>
           push(value, {
             kind: "page",
@@ -254,6 +241,21 @@ export default function Browser() {
             document: page.document,
             scrollTop: 0,
           }),
+        );
+        const clientNavId = navigationId();
+        void recordVisit({
+          personId,
+          revisionId: page.revisionId,
+          via,
+          clientNavId,
+        }).then(
+          () => {
+            setHistoryVersion((version) => version + 1);
+          },
+          (cause: unknown) => {
+            if (flight.current !== id) return;
+            setNotice(messageOf(cause));
+          },
         );
       } catch (cause: unknown) {
         if (flight.current !== id) return;
